@@ -1395,10 +1395,19 @@ int mbedtls_ssl_tls13_check_early_data_len(mbedtls_ssl_context *ssl,
      * data, it means that early_data_len is smaller than max_early_data_size
      * (type uint32_t) and can fit in an uint32_t. We use this further
      * down.
+     *
+     * Compute the running total first and compare it against the configured
+     * limit rather than subtracting the already accounted amount from the
+     * limit. The operands are of different (unsigned) integer kinds, so a
+     * subtraction would wrap around to a huge value if the amount already
+     * received ever exceeded the limit and the check would be silently
+     * bypassed. Rejecting the record yields the same, deterministic result
+     * regardless of how the inputs are arranged.
      */
-    if (early_data_len >
-        (ssl->session_negotiate->max_early_data_size -
-         ssl->total_early_data_size)) {
+    if (early_data_len > ssl->session_negotiate->max_early_data_size ||
+        ssl->total_early_data_size >
+            ssl->session_negotiate->max_early_data_size -
+            (uint32_t) early_data_len) {
 
         MBEDTLS_SSL_DEBUG_MSG(
             2, ("EarlyData: Too much early data received, "

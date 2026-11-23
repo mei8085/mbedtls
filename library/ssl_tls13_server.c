@@ -416,9 +416,10 @@ static int ssl_tls13_offered_psks_check_binder_match(
 
     unsigned char transcript[PSA_HASH_MAX_SIZE];
     size_t transcript_len;
-    unsigned char *psk;
+    unsigned char *psk = NULL;
     size_t psk_len;
     unsigned char server_computed_binder[PSA_HASH_MAX_SIZE];
+    int binder_matches = 0;
 
     if (binder_len != PSA_HASH_LENGTH(psk_hash_alg)) {
         return MBEDTLS_ERR_SSL_HANDSHAKE_FAILURE;
@@ -429,37 +430,45 @@ static int ssl_tls13_offered_psks_check_binder_match(
         ssl, mbedtls_md_type_from_psa_alg(psk_hash_alg),
         transcript, sizeof(transcript), &transcript_len);
     if (ret != 0) {
-        return ret;
+        goto cleanup;
     }
 
     ret = mbedtls_ssl_tls13_export_handshake_psk(ssl, &psk, &psk_len);
     if (ret != 0) {
-        return ret;
+        goto cleanup;
     }
 
     ret = mbedtls_ssl_tls13_create_psk_binder(ssl, psk_hash_alg,
                                               psk, psk_len, psk_type,
                                               transcript,
                                               server_computed_binder);
-    mbedtls_free((void *) psk);
     if (ret != 0) {
         MBEDTLS_SSL_DEBUG_MSG(1, ("PSK binder calculation failed."));
-        return MBEDTLS_ERR_SSL_HANDSHAKE_FAILURE;
+        ret = MBEDTLS_ERR_SSL_HANDSHAKE_FAILURE;
+        goto cleanup;
     }
 
     MBEDTLS_SSL_DEBUG_BUF(3, "psk binder ( computed ): ",
-                          server_computed_binder, transcript_len);
+                          server_computed_binder,
+                          PSA_HASH_LENGTH(psk_hash_alg));
     MBEDTLS_SSL_DEBUG_BUF(3, "psk binder ( received ): ", binder, binder_len);
 
-    if (mbedtls_ct_memcmp(server_computed_binder,
+    binder_matches =
+        mbedtls_ct_memcmp(server_computed_binder,
                           binder,
-                          PSA_HASH_LENGTH(psk_hash_alg)) == 0) {
-        return 0;
-    }
+                          PSA_HASH_LENGTH(psk_hash_alg)) == 0;
+    ret = binder_matches ? 0 : MBEDTLS_ERR_SSL_HANDSHAKE_FAILURE;
 
+cleanup:
+    /* Free the exported PSK and zeroize the transcript hash and the locally
+     * computed binder on every return path so that key derived material does
+     * not linger on the stack regardless of whether the received binder was
+     * accepted or rejected. */
+    mbedtls_free((void *) psk);
+    mbedtls_platform_zeroize(transcript, sizeof(transcript));
     mbedtls_platform_zeroize(server_computed_binder,
                              sizeof(server_computed_binder));
-    return MBEDTLS_ERR_SSL_HANDSHAKE_FAILURE;
+    return ret;
 }
 
 #if defined(MBEDTLS_SSL_SESSION_TICKETS)

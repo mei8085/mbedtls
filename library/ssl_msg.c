@@ -6019,8 +6019,17 @@ int mbedtls_ssl_write_early_data(mbedtls_ssl_context *ssl,
             return MBEDTLS_ERR_SSL_CANNOT_WRITE_EARLY_DATA;
         }
 
-        remaining = ssl->session_negotiate->max_early_data_size -
-                    ssl->total_early_data_size;
+        /* Compute the remaining quota without subtracting from a possibly
+         * smaller limit: if the amount already written ever exceeds the
+         * ticket limit, treat the quota as exhausted instead of wrapping
+         * around to a huge value and writing past the configured bound. */
+        if (ssl->total_early_data_size >=
+            ssl->session_negotiate->max_early_data_size) {
+            remaining = 0;
+        } else {
+            remaining = ssl->session_negotiate->max_early_data_size -
+                        ssl->total_early_data_size;
+        }
 
         if (remaining == 0) {
             return MBEDTLS_ERR_SSL_CANNOT_WRITE_EARLY_DATA;

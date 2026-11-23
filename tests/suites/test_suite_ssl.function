@@ -9146,6 +9146,68 @@ exit:
 }
 /* END_CASE */
 
+/* BEGIN_CASE depends_on:MBEDTLS_SSL_EARLY_DATA:MBEDTLS_SSL_SRV_C:MBEDTLS_SSL_PROTO_TLS1_3 */
+void tls13_check_early_data_len_boundaries(void)
+{
+    /*
+     * The length check must enforce a single rule regardless of how the
+     * running total and the newly presented record length are arranged:
+     * accept exactly up to the ticket limit, reject everything beyond it,
+     * and never let an unsigned subtraction on a saturated total wrap around.
+     */
+    mbedtls_ssl_context ssl;
+    mbedtls_ssl_config conf;
+    const uint32_t limit = 16;
+
+    mbedtls_ssl_init(&ssl);
+    mbedtls_ssl_config_init(&conf);
+    PSA_INIT();
+
+    TEST_EQUAL(mbedtls_ssl_config_defaults(&conf, MBEDTLS_SSL_IS_SERVER,
+                                           MBEDTLS_SSL_TRANSPORT_STREAM,
+                                           MBEDTLS_SSL_PRESET_DEFAULT), 0);
+    TEST_EQUAL(mbedtls_ssl_setup(&ssl, &conf), 0);
+
+    ssl.session_negotiate->max_early_data_size = limit;
+    TEST_EQUAL(ssl.total_early_data_size, 0);
+
+    /* A first record fitting within the remaining quota is accepted. */
+    TEST_EQUAL(mbedtls_ssl_tls13_check_early_data_len(&ssl, 10), 0);
+    TEST_EQUAL(ssl.total_early_data_size, 10);
+
+    /* A record exactly filling the remaining quota is accepted. */
+    TEST_EQUAL(mbedtls_ssl_tls13_check_early_data_len(&ssl, 6), 0);
+    TEST_EQUAL(ssl.total_early_data_size, limit);
+
+    /* Any further record is rejected once the quota is exhausted. */
+    TEST_EQUAL(mbedtls_ssl_tls13_check_early_data_len(&ssl, 1),
+               MBEDTLS_ERR_SSL_UNEXPECTED_MESSAGE);
+    /* The rejected record must not be accounted for. */
+    TEST_EQUAL(ssl.total_early_data_size, limit);
+
+    /*
+     * Simulate a running total already past the limit, as could be left by an
+     * earlier accounting path. The check must reject instead of computing a
+     * wrapped "remaining" value and accepting the record.
+     */
+    ssl.total_early_data_size = limit + 4;
+    TEST_EQUAL(mbedtls_ssl_tls13_check_early_data_len(&ssl, 1),
+               MBEDTLS_ERR_SSL_UNEXPECTED_MESSAGE);
+    TEST_EQUAL(ssl.total_early_data_size, limit + 4);
+
+    /* A single record larger than the whole limit is rejected outright. */
+    ssl.total_early_data_size = 0;
+    TEST_EQUAL(mbedtls_ssl_tls13_check_early_data_len(&ssl, limit + 1),
+               MBEDTLS_ERR_SSL_UNEXPECTED_MESSAGE);
+    TEST_EQUAL(ssl.total_early_data_size, 0);
+
+exit:
+    mbedtls_ssl_free(&ssl);
+    mbedtls_ssl_config_free(&conf);
+    PSA_DONE();
+}
+/* END_CASE */
+
 /* BEGIN_CASE depends_on:MBEDTLS_SSL_PROTO_TLS1_3:MBEDTLS_DEBUG_C:MBEDTLS_SSL_CLI_C:MBEDTLS_SSL_SRV_C:MBEDTLS_TEST_AT_LEAST_ONE_TLS1_3_CIPHERSUITE:MBEDTLS_TEST_HAS_DEFAULT_EC_GROUP:MBEDTLS_SSL_TLS1_3_KEY_EXCHANGE_MODE_EPHEMERAL_ENABLED:PSA_WANT_ALG_SHA_256:MBEDTLS_X509_RSASSA_PSS_SUPPORT:PSA_WANT_ALG_RSA_PKCS1V15_SIGN */
 void tls13_record_boundary_alignment(int endpoint, int handshake_message)
 {
