@@ -659,6 +659,25 @@ typedef enum {
 } mbedtls_ssl_tls13_key_exchange_input;
 
 /*
+ * State of the DTLS HelloVerifyRequest cookie check for the ClientHello
+ * currently being processed by a server.
+ *
+ * MBEDTLS_SSL_COOKIE_VERIFY_UNSET must be 0 and distinct from PASSED: the
+ * handshake parameters are zeroized at the start of every handshake, and a
+ * freshly zeroized field must never be read as "the client proved
+ * reachability". The cookie check is treated as satisfied only for
+ * PASSED (with a matching bound address) or NOT_REQUIRED (cookies not
+ * configured, or renegotiation); every other value fails closed and makes
+ * the server emit a HelloVerifyRequest instead of proceeding.
+ */
+typedef enum {
+    MBEDTLS_SSL_COOKIE_VERIFY_UNSET = 0,    /* No decision yet -> fail closed */
+    MBEDTLS_SSL_COOKIE_VERIFY_NOT_REQUIRED, /* Cookie check does not apply    */
+    MBEDTLS_SSL_COOKIE_VERIFY_FAILED,       /* Cookie check failed            */
+    MBEDTLS_SSL_COOKIE_VERIFY_PASSED,       /* Cookie check succeeded         */
+} mbedtls_ssl_cookie_verify_state;
+
+/*
  * This structure contains the parameters only needed during handshake.
  */
 struct mbedtls_ssl_handshake_params {
@@ -892,7 +911,20 @@ struct mbedtls_ssl_handshake_params {
           ( MBEDTLS_SSL_PROTO_DTLS ||
             MBEDTLS_SSL_PROTO_TLS1_3 ) */
 #if defined(MBEDTLS_SSL_SRV_C) && defined(MBEDTLS_SSL_PROTO_DTLS)
-    unsigned char cookie_verify_result; /*!< Srv: flag for sending a cookie */
+    /* Result of the DTLS HelloVerifyRequest cookie check performed while
+     * parsing the current ClientHello (see mbedtls_ssl_cookie_verify_state).
+     */
+    mbedtls_ssl_cookie_verify_state cookie_verify_result;
+
+    /* Client transport ID for which `cookie_verify_result == PASSED` was
+     * reached. A verification conclusion is only meaningful for the exact
+     * client address it was derived for, so we keep a private copy, compare
+     * it against the current address before trusting the conclusion, and
+     * treat a mismatch as "not verified". This makes the binding between the
+     * client address and the handshake state explicit instead of relying on
+     * the caller never changing the address between the check and its use. */
+    unsigned char *cookie_verify_cli_id;   /*!< Copy of the bound address   */
+    size_t cookie_verify_cli_id_len;       /*!< Length of the bound address */
 #endif /* MBEDTLS_SSL_SRV_C && MBEDTLS_SSL_PROTO_DTLS */
 
 #if defined(MBEDTLS_SSL_PROTO_DTLS)
@@ -2762,6 +2794,21 @@ int mbedtls_ssl_check_dtls_clihlo_cookie(
     const unsigned char *cli_id, size_t cli_id_len,
     const unsigned char *in, size_t in_len,
     unsigned char *obuf, size_t buf_len, size_t *olen);
+
+#if defined(MBEDTLS_SSL_SRV_C) && defined(MBEDTLS_SSL_PROTO_DTLS)
+/*
+ * Test whether the server would accept the ServerHello for the current
+ * ClientHello, i.e. whether the cookie check passed for the current client
+ * transport ID. Exposed for tests that need to exercise the binding between
+ * the client address and the "verified" conclusion without a full handshake.
+ */
+int mbedtls_ssl_dtls_cookie_verify_accepted(const mbedtls_ssl_context *ssl);
+
+/* Bind the current client transport ID to a successful cookie check, as the
+ * ClientHello parser would after a passing check. Exposed for tests. */
+MBEDTLS_CHECK_RETURN_CRITICAL
+int mbedtls_ssl_cookie_verify_bind_cli_id_for_test(mbedtls_ssl_context *ssl);
+#endif /* MBEDTLS_SSL_SRV_C && MBEDTLS_SSL_PROTO_DTLS */
 #endif
 
 #if defined(MBEDTLS_SSL_TLS1_3_KEY_EXCHANGE_MODE_SOME_PSK_ENABLED)

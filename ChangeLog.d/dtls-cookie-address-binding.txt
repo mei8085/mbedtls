@@ -1,0 +1,11 @@
+Security
+   * Fix DTLS server HelloVerifyRequest handling so that a cookie
+     verification conclusion is bound to the client transport address it
+     was reached for. A ClientHello carrying a cookie that was issued for a
+     different client address, or a stale conclusion left over from a
+     previous connection, could previously be treated as authenticated.
+     The server now only proceeds to the ServerHello when the cookie check
+     has explicitly passed for the current address; a failed or unmatched
+     check leaves the handshake in the "verification failed" state, which
+     prompts a HelloVerifyRequest, and no verification state is retained
+     for reuse by later connections.

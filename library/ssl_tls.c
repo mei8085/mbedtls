@@ -1414,6 +1414,14 @@ int mbedtls_ssl_session_reset_int(mbedtls_ssl_context *ssl, int partial)
         mbedtls_free(ssl->cli_id);
         ssl->cli_id = NULL;
         ssl->cli_id_len = 0;
+        /* The client address is being dropped, so any cookie verification
+         * conclusion bound to it must be dropped too. */
+        if (ssl->handshake != NULL) {
+            mbedtls_zeroize_and_free(ssl->handshake->cookie_verify_cli_id,
+                                     ssl->handshake->cookie_verify_cli_id_len);
+            ssl->handshake->cookie_verify_cli_id = NULL;
+            ssl->handshake->cookie_verify_cli_id_len = 0;
+        }
     }
 #endif
 
@@ -4503,6 +4511,16 @@ void mbedtls_ssl_handshake_free(mbedtls_ssl_context *ssl)
     if (handshake == NULL) {
         return;
     }
+
+#if defined(MBEDTLS_SSL_SRV_C) && defined(MBEDTLS_SSL_PROTO_DTLS)
+    /* Drop the address bound to any previous cookie verification conclusion,
+     * so a conclusion reached for one client address can never be reused by
+     * another connection handled by the same context. */
+    mbedtls_zeroize_and_free(handshake->cookie_verify_cli_id,
+                             handshake->cookie_verify_cli_id_len);
+    handshake->cookie_verify_cli_id = NULL;
+    handshake->cookie_verify_cli_id_len = 0;
+#endif /* MBEDTLS_SSL_SRV_C && MBEDTLS_SSL_PROTO_DTLS */
 
 #if defined(MBEDTLS_SSL_HANDSHAKE_WITH_CERT_ENABLED)
 #if defined(MBEDTLS_SSL_PROTO_TLS1_3)

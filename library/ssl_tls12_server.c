@@ -67,6 +67,121 @@ void mbedtls_ssl_conf_dtls_cookies(mbedtls_ssl_config *conf,
     conf->f_cookie_check = f_cookie_check;
     conf->p_cookie       = p_cookie;
 }
+
+/*
+ * Forget any client address previously bound to a successful cookie check.
+ *
+ * A cookie verification conclusion only applies to the client address it was
+ * derived for. Whenever the conclusion is dropped (a failed attempt, a fresh
+ * ClientHello, or teardown) the bound address must go with it, so that a
+ * conclusion reached for one address can never be reused for another.
+ */
+static void ssl_cookie_verify_clear_binding(mbedtls_ssl_context *ssl)
+{
+    mbedtls_zeroize_and_free(ssl->handshake->cookie_verify_cli_id,
+                             ssl->handshake->cookie_verify_cli_id_len);
+    ssl->handshake->cookie_verify_cli_id = NULL;
+    ssl->handshake->cookie_verify_cli_id_len = 0;
+}
+
+/*
+ * Bind the current client transport ID to a successful cookie check.
+ *
+ * Returns 0 on success, or MBEDTLS_ERR_SSL_ALLOC_FAILED. On allocation
+ * failure any previous binding is cleared and the caller must not treat the
+ * check as successful.
+ */
+MBEDTLS_CHECK_RETURN_CRITICAL
+static int ssl_cookie_verify_bind_cli_id(mbedtls_ssl_context *ssl)
+{
+    mbedtls_ssl_handshake_params * const hs = ssl->handshake;
+    unsigned char *copy = NULL;
+
+    ssl_cookie_verify_clear_binding(ssl);
+
+    if (ssl->cli_id_len == 0) {
+        /* No address to bind; an empty ID always matches an empty ID, so a
+         * separate copy is not needed. Leave the binding empty and let the
+         * comparison below accept it. */
+        return 0;
+    }
+
+    copy = mbedtls_calloc(1, ssl->cli_id_len);
+    if (copy == NULL) {
+        return MBEDTLS_ERR_SSL_ALLOC_FAILED;
+    }
+
+    memcpy(copy, ssl->cli_id, ssl->cli_id_len);
+    hs->cookie_verify_cli_id = copy;
+    hs->cookie_verify_cli_id_len = ssl->cli_id_len;
+
+    return 0;
+}
+
+/*
+ * Return 1 if the current client transport ID matches the one bound to the
+ * last successful cookie check, 0 otherwise.
+ */
+static int ssl_cookie_verify_cli_id_matches(const mbedtls_ssl_context *ssl)
+{
+    const mbedtls_ssl_handshake_params * const hs = ssl->handshake;
+
+    if (hs->cookie_verify_cli_id_len != ssl->cli_id_len) {
+        return 0;
+    }
+
+    if (ssl->cli_id_len == 0) {
+        return 1;
+    }
+
+    if (hs->cookie_verify_cli_id == NULL || ssl->cli_id == NULL) {
+        return 0;
+    }
+
+    return memcmp(hs->cookie_verify_cli_id, ssl->cli_id,
+                  ssl->cli_id_len) == 0;
+}
+
+/*
+ * Decide whether the ClientHello currently being handled may proceed to the
+ * ServerHello, i.e. whether the client's reachability has been established.
+ *
+ * The handshake proceeds only when the cookie check explicitly passed *and*
+ * that conclusion was reached for the current client transport ID. The
+ * "not required" state (cookies not configured, or renegotiation) also
+ * proceeds, matching the historic behaviour. Everything else - including the
+ * zero-initialized "unset" state - fails closed and leads to a
+ * HelloVerifyRequest.
+ */
+static int ssl_cookie_verify_accepted(const mbedtls_ssl_context *ssl)
+{
+    const mbedtls_ssl_handshake_params * const hs = ssl->handshake;
+
+    switch (hs->cookie_verify_result) {
+        case MBEDTLS_SSL_COOKIE_VERIFY_NOT_REQUIRED:
+            return 1;
+
+        case MBEDTLS_SSL_COOKIE_VERIFY_PASSED:
+            return ssl_cookie_verify_cli_id_matches(ssl);
+
+        case MBEDTLS_SSL_COOKIE_VERIFY_FAILED:
+        case MBEDTLS_SSL_COOKIE_VERIFY_UNSET:
+        default:
+            return 0;
+    }
+}
+
+#if defined(MBEDTLS_TEST_HOOKS)
+int mbedtls_ssl_dtls_cookie_verify_accepted(const mbedtls_ssl_context *ssl)
+{
+    return ssl_cookie_verify_accepted(ssl);
+}
+
+int mbedtls_ssl_cookie_verify_bind_cli_id_for_test(mbedtls_ssl_context *ssl)
+{
+    return ssl_cookie_verify_bind_cli_id(ssl);
+}
+#endif /* MBEDTLS_TEST_HOOKS */
 #endif /* MBEDTLS_SSL_DTLS_HELLO_VERIFY */
 
 #if defined(MBEDTLS_KEY_EXCHANGE_SOME_PSK_ENABLED)
@@ -1091,10 +1206,25 @@ static int ssl_parse_client_hello(mbedtls_ssl_context *ssl)
                                           buf + cookie_offset + 1, cookie_len,
                                           ssl->cli_id, ssl->cli_id_len) != 0) {
                 MBEDTLS_SSL_DEBUG_MSG(2, ("cookie verification failed"));
-                ssl->handshake->cookie_verify_result = 1;
+                ssl->handshake->cookie_verify_result =
+                    MBEDTLS_SSL_COOKIE_VERIFY_FAILED;
+                /* A failed attempt must not leave a conclusion (or the
+                 * address it was bound to) reusable by a later connection. */
+                ssl_cookie_verify_clear_binding(ssl);
             } else {
                 MBEDTLS_SSL_DEBUG_MSG(2, ("cookie verification passed"));
-                ssl->handshake->cookie_verify_result = 0;
+                /* Record the address this conclusion holds for *before*
+                 * declaring success, so an allocation failure cannot leave
+                 * a PASSED state bound to no (or a stale) address. */
+                if ((ret = ssl_cookie_verify_bind_cli_id(ssl)) != 0) {
+                    MBEDTLS_SSL_DEBUG_RET(1, "ssl_cookie_verify_bind_cli_id",
+                                          ret);
+                    ssl->handshake->cookie_verify_result =
+                        MBEDTLS_SSL_COOKIE_VERIFY_FAILED;
+                    return ret;
+                }
+                ssl->handshake->cookie_verify_result =
+                    MBEDTLS_SSL_COOKIE_VERIFY_PASSED;
             }
         } else
 #endif /* MBEDTLS_SSL_DTLS_HELLO_VERIFY */
@@ -1106,6 +1236,13 @@ static int ssl_parse_client_hello(mbedtls_ssl_context *ssl)
                 return MBEDTLS_ERR_SSL_DECODE_ERROR;
             }
 
+#if defined(MBEDTLS_SSL_DTLS_HELLO_VERIFY)
+            /* No cookie check applies here (no callbacks, or renegotiation):
+             * record that explicitly so the ServerHello writer does not
+             * mistake the zero-initialized "unset" state for success. */
+            ssl->handshake->cookie_verify_result =
+                MBEDTLS_SSL_COOKIE_VERIFY_NOT_REQUIRED;
+#endif
             MBEDTLS_SSL_DEBUG_MSG(2, ("cookie verification skipped"));
         }
 
@@ -2062,7 +2199,7 @@ static int ssl_write_server_hello(mbedtls_ssl_context *ssl)
 
 #if defined(MBEDTLS_SSL_DTLS_HELLO_VERIFY)
     if (ssl->conf->transport == MBEDTLS_SSL_TRANSPORT_DATAGRAM &&
-        ssl->handshake->cookie_verify_result != 0) {
+        !ssl_cookie_verify_accepted(ssl)) {
         MBEDTLS_SSL_DEBUG_MSG(2, ("client hello was not authenticated"));
         MBEDTLS_SSL_DEBUG_MSG(2, ("<= write server hello"));
 

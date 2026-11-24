@@ -5312,6 +5312,75 @@ exit:
 }
 /* END_CASE */
 
+/* BEGIN_CASE depends_on:MBEDTLS_SSL_SRV_C:MBEDTLS_SSL_DTLS_CLIENT_PORT_REUSE:MBEDTLS_TEST_HOOKS */
+void cookie_verify_cli_id_binding()
+{
+    /*
+     * The "cookie verified" conclusion is only valid for the client address
+     * it was reached for. Check the decision logic directly: it must be a
+     * strict "PASSED and bound to the current address" test, with the
+     * zero-initialized state failing closed, and any change of the client
+     * address invalidating a previously reached conclusion.
+     */
+    mbedtls_ssl_context ssl;
+    mbedtls_ssl_config conf;
+    unsigned char cli_a[4] = { 127, 0, 0, 1 };
+    unsigned char cli_b[4] = { 127, 0, 0, 2 };
+
+    mbedtls_ssl_init(&ssl);
+    mbedtls_ssl_config_init(&conf);
+    USE_PSA_INIT();
+
+    TEST_EQUAL(mbedtls_ssl_config_defaults(&conf, MBEDTLS_SSL_IS_SERVER,
+                                           MBEDTLS_SSL_TRANSPORT_DATAGRAM,
+                                           MBEDTLS_SSL_PRESET_DEFAULT),
+               0);
+    TEST_EQUAL(mbedtls_ssl_setup(&ssl, &conf), 0);
+
+    /* A freshly initialized handshake must not be treated as verified. */
+    TEST_ASSERT(ssl.handshake != NULL);
+    TEST_ASSERT(ssl.handshake->cookie_verify_result ==
+                MBEDTLS_SSL_COOKIE_VERIFY_UNSET);
+    TEST_EQUAL(mbedtls_ssl_dtls_cookie_verify_accepted(&ssl), 0);
+
+    /* "Check not required" proceeds, matching the historic behaviour, and
+     * does not depend on the client address. */
+    ssl.handshake->cookie_verify_result =
+        MBEDTLS_SSL_COOKIE_VERIFY_NOT_REQUIRED;
+    TEST_EQUAL(mbedtls_ssl_dtls_cookie_verify_accepted(&ssl), 1);
+
+    /* A failed check never proceeds, even with an address installed. */
+    TEST_EQUAL(mbedtls_ssl_set_client_transport_id(&ssl, cli_a,
+                                                   sizeof(cli_a)), 0);
+    ssl.handshake->cookie_verify_result = MBEDTLS_SSL_COOKIE_VERIFY_FAILED;
+    TEST_EQUAL(mbedtls_ssl_dtls_cookie_verify_accepted(&ssl), 0);
+
+    /* A "passed" conclusion with no bound address must not match a non-empty
+     * client address: the check fails closed. */
+    ssl.handshake->cookie_verify_result = MBEDTLS_SSL_COOKIE_VERIFY_PASSED;
+    TEST_EQUAL(mbedtls_ssl_dtls_cookie_verify_accepted(&ssl), 0);
+
+    /* A passing check recorded against cli_a only proceeds for cli_a. */
+    TEST_EQUAL(mbedtls_ssl_cookie_verify_bind_cli_id_for_test(&ssl), 0);
+    TEST_EQUAL(mbedtls_ssl_dtls_cookie_verify_accepted(&ssl), 1);
+
+    /* Re-pointing the context at a different client address must invalidate
+     * the conclusion that was bound to the previous address. */
+    TEST_EQUAL(mbedtls_ssl_set_client_transport_id(&ssl, cli_b,
+                                                   sizeof(cli_b)), 0);
+    TEST_EQUAL(mbedtls_ssl_dtls_cookie_verify_accepted(&ssl), 0);
+
+    /* Re-binding to the new address restores acceptance. */
+    TEST_EQUAL(mbedtls_ssl_cookie_verify_bind_cli_id_for_test(&ssl), 0);
+    TEST_EQUAL(mbedtls_ssl_dtls_cookie_verify_accepted(&ssl), 1);
+
+exit:
+    mbedtls_ssl_free(&ssl);
+    mbedtls_ssl_config_free(&conf);
+    USE_PSA_DONE();
+}
+/* END_CASE */
+
 /* BEGIN_CASE depends_on:MBEDTLS_TIMING_C:MBEDTLS_HAVE_TIME */
 void timing_final_delay_accessor()
 {
